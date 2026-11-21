@@ -3,12 +3,16 @@
 from .score_tree import BPlusTree, Score
 
 
+DEFAULT_BATCH_NO = '未标注批次'
+
+
 SPEC = {
     'name': '榆弦谱库·曲谱目录页索引',
     'summary': '按曲谱编号圈定团借范围，划出可拣配和需候补的曲谱，并巡检目录索引。',
     'customer': '榆弦社区音乐中心 · 曲谱流通组',
     'entity_labels': ['曲目索引批', '索引巡检', '范围借阅单'],
     'field_labels': {
+        'batch_no': '曲谱目录批次号',
         'page_capacity': '页容量（最大键数）',
         'range_start': '起始曲谱编号（含）',
         'range_end': '结束曲谱编号（含）',
@@ -17,8 +21,9 @@ SPEC = {
         'title': '谱名',
         'available_copies': '可借份数',
     },
-    'guidance': '按目录到达顺序录入曲谱，编号须唯一。设置每页最大键数和含首尾的编号区间，再核对页分裂、巡检和借阅明细。',
+    'guidance': '扫描端可能重复送批：同一批次号与内容重复提交会复用既有执行，不新增证据；与已归并批次编号冲突会被拒绝并列出冲突明细。按目录到达顺序录入曲谱，编号须唯一，设置每页最大键数和含首尾的编号区间，再核对页分裂、巡检和借阅明细。',
     'sample': {
+        'batch_no': 'CAT-20261121-A',
         'page_capacity': 3,
         'range_start': 1204,
         'range_end': 1212,
@@ -60,9 +65,13 @@ def _integer(value, minimum: int, maximum: int, label: str) -> int:
     return value
 
 
-def _read_payload(payload) -> tuple[int, int, int, list[Score]]:
+def _read_payload(payload) -> tuple[str, int, int, int, list[Score]]:
     if not isinstance(payload, dict):
         raise ValueError('请提交曲目索引批对象')
+    batch_no = payload.get('batch_no', DEFAULT_BATCH_NO)
+    if not isinstance(batch_no, str) or not 1 <= len(batch_no.strip()) <= 64:
+        raise ValueError('曲谱目录批次号须为 1 至 64 字符的字符串')
+    batch_no = batch_no.strip()
     capacity = _integer(payload.get('page_capacity'), 2, 128, '页容量')
     first = _integer(payload.get('range_start'), 1, 999_999_999, '起始曲谱编号')
     last = _integer(payload.get('range_end'), 1, 999_999_999, '结束曲谱编号')
@@ -87,7 +96,7 @@ def _read_payload(payload) -> tuple[int, int, int, list[Score]]:
         available = _integer(row.get('available_copies'), 0, 9999, f'{label}可借份数')
         scores.append(Score(number, title.strip(), available))
         numbers.add(number)
-    return capacity, first, last, scores
+    return batch_no, capacity, first, last, scores
 
 
 def validate(payload) -> None:
@@ -96,7 +105,7 @@ def validate(payload) -> None:
 
 def solve(payload, engine):
     """Rebuild an isolated logical index. The application owns persistence."""
-    capacity, first, last, scores = _read_payload(payload)
+    batch_no, capacity, first, last, scores = _read_payload(payload)
     tree = BPlusTree(capacity)
     for score in scores:
         tree.insert(score)
@@ -126,7 +135,30 @@ def solve(payload, engine):
     summary = f'{interval}未找到登记曲谱。'
     if found:
         summary = f'{interval}命中 {found} 种曲谱，{ready} 种可拣配共 {copies} 份，{found - ready} 种候补。'
+
+    # 巡检闸门：结构（叶页链、记录数守恒等）与范围结果全部通过，报告才可导出
+    inspection_rows = checks + result.range_checks
+    inspection_passed = all(row['判定'] == '通过' for row in inspection_rows)
+    exportable = inspection_passed
+    batch_summary = {
+        '批次号': batch_no,
+        '目录曲谱数': len(scores),
+        '库存份数合计': sum(score.available_copies for score in scores),
+        '编号区间': f'{min((score.number for score in scores), default="—")} 至 '
+                    f'{max((score.number for score in scores), default="—")}',
+        '页容量': capacity,
+    }
+    inspection_conclusion = {
+        '巡检结论': '通过，报告可安全下载' if exportable else '未通过，报告已锁定不可导出',
+        '结构巡检': f'{len(checks)} 项全部通过' if all(row['判定'] == '通过' for row in checks) else '存在失败项',
+        '范围结果巡检': f'{len(result.range_checks)} 项全部通过'
+        if all(row['判定'] == '通过' for row in result.range_checks) else '存在失败项',
+        '可导出状态': '可导出' if exportable else '不可导出',
+    }
     return {
+        'batch_no': batch_no,
+        'exportable': exportable,
+        'inspection_passed': inspection_passed,
         'summary': summary,
         'metrics': {
             '区间命中曲谱': found, '可拣配曲谱': ready, '候补曲谱': found - ready,
@@ -135,11 +167,14 @@ def solve(payload, engine):
             '内部页分裂': len(tree.splits) - leaf_splits, '扫描叶页': len(result.visits),
         },
         'sections': [
+            {'title': '批次摘要', 'rows': [batch_summary]},
+            {'title': '巡检结论', 'rows': [inspection_conclusion]},
             {'title': '范围借阅单', 'rows': lending_rows},
             {'title': '起始编号寻址', 'rows': [
                 {'起始编号': first, '结束编号': last, '根到叶路径': result.descent},
             ]},
             {'title': '叶页链读取', 'rows': visit_rows},
+            {'title': '范围结果巡检', 'rows': result.range_checks},
             {'title': '页分裂记录', 'rows': split_rows},
             {'title': '索引页目录', 'rows': pages},
             {'title': '结构不变量巡检', 'rows': checks},

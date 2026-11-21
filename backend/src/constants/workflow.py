@@ -12,3 +12,10 @@ class Status(StrEnum):
     RUNNING = 'running'
     COMPLETE = 'complete'
     FAILED = 'failed'
+    REJECTED = 'rejected'
+
+
+class BatchStatus(StrEnum):
+    ACCEPTED = 'accepted'
+    REJECTED = 'rejected'
+    FAILED = 'failed'

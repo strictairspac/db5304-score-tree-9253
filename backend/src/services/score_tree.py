@@ -52,6 +52,7 @@ class RangeResult:
     descent: list[int]
     visits: list[LeafVisit]
     matches: list[tuple[int, Score]]
+    range_checks: list[dict] = field(default_factory=list)
 
 
 class BPlusTree:
@@ -132,7 +133,58 @@ class BPlusTree:
                 break
             leaf = leaf.next_leaf
             offset = 0
+        result.range_checks = self._verify_range(first, last, result)
         return result
+
+    def _verify_range(self, first: int, last: int, result: RangeResult) -> list[dict]:
+        """巡检闭区间结果：边界闭合、编号升序、叶链连续，且与全量键集合一致。"""
+        def row(item: str, passed: bool, basis: str) -> dict:
+            return {'检查项': item, '判定': '通过' if passed else '失败', '依据': basis}
+
+        checks: list[dict] = []
+        keys = [score.number for _, score in result.matches]
+        in_bounds = all(first <= key <= last for key in keys)
+        checks.append(row('区间闭合', in_bounds,
+                          f'命中 {len(keys)} 条，编号均落在闭区间 [{first}, {last}] 内（含两端）'))
+        ordered = all(left < right for left, right in zip(keys, keys[1:]))
+        checks.append(row('命中编号升序', ordered, '命中明细按编号严格递增排列'))
+        first_leaf_matches = bool(result.visits) and result.visits[0].page_id == result.descent[-1]
+        chain_steps = all(
+            self._leaf_by_id(previous.page_id).next_leaf is self._leaf_by_id(current.page_id)
+            for previous, current in zip(result.visits, list(result.visits)[1:]))
+        tail = self._leaf_by_id(result.visits[-1].page_id) if result.visits else None
+        tail_ok = tail is None or tail.next_leaf is None or (
+            tail.entries and tail.entries[-1].number >= last)
+        checks.append(row('叶链读取连续', first_leaf_matches and chain_steps and tail_ok,
+                          f'自下探落点叶页起沿后继读取 {len(result.visits)} 个叶页，无跳页、尾页无越界读取'))
+        expected = sorted(score.number for score in self._all_scores() if first <= score.number <= last)
+        complete = expected == keys
+        checks.append(row('范围结果完整', complete,
+                          f'区间内全量登记 {len(expected)} 条，叶链命中 {len(keys)} 条，二者一致'))
+        return checks
+
+    def _leaf_by_id(self, page_id: int) -> LeafPage:
+        page = self.root
+        stack = [page]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, LeafPage):
+                if current.page_id == page_id:
+                    return current
+            else:
+                stack.extend(current.children)
+        raise KeyError(page_id)
+
+    def _all_scores(self) -> list[Score]:
+        page = self.root
+        while isinstance(page, InternalPage):
+            page = page.children[0]
+        scores: list[Score] = []
+        leaf: LeafPage | None = page
+        while leaf is not None:
+            scores.extend(leaf.entries)
+            leaf = leaf.next_leaf
+        return scores
 
     def inspect(self, expected_count: int) -> tuple[list[dict], list[dict], int]:
         """Walk the child pointers, then verify that leaf links match that traversal."""

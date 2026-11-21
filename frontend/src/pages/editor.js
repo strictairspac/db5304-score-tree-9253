@@ -21,7 +21,7 @@ export function bindEditor(state, api, fail) {
     const draft = await api('/cases', {method:'POST', data:{title:data.get('title'), payload}});
     try {
       const run = await api(`/cases/${draft.id}/runs`, {method:'POST'});
-      go(`runs/${run.id}`);
+      go(`runs/${run.reused ? run.run.id : run.id}`);
     } catch (error) {
       go(`cases/${draft.id}`);
       fail(new Error(`档案已保存。提交执行失败：${error.message}`));
